@@ -43,11 +43,11 @@ This plugin reads the user's local Codex auth file:
 
 It uses the stored Codex ChatGPT access token and account id to request:
 
-`https://chatgpt.com/backend-api/wham/usage`
+`https://chatgpt.com/backend-api/codex/usage`
 
 Tokens are not displayed, logged, or sent anywhere except OpenAI/ChatGPT.
 
-The plugin does not use the refresh token. If the access token is stale, the key shows a login/auth state and the user should refresh their Codex login through Codex itself.
+If the access token is stale, the plugin uses the stored Codex refresh token to refresh the local login and writes the updated tokens back to `auth.json`.
 
 ## Development
 

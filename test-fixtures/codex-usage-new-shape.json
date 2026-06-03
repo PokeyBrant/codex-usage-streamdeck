@@ -1,0 +1,29 @@
+{
+  "planType": "plus",
+  "primary": {
+    "usedPercent": 24,
+    "windowDurationMins": 300,
+    "resetsAt": 1778150000
+  },
+  "secondary": {
+    "usedPercent": 9,
+    "windowDurationMins": 10080,
+    "resetsAt": 1778551284
+  },
+  "additionalRateLimits": [
+    {
+      "limitName": "codex_other",
+      "primary": {
+        "usedPercent": 40,
+        "windowDurationMins": 300,
+        "resetsAt": 1778142800
+      },
+      "secondary": {
+        "usedPercent": 12,
+        "windowDurationMins": 10080,
+        "resetsAt": 1778495284
+      }
+    }
+  ],
+  "credits": null
+}

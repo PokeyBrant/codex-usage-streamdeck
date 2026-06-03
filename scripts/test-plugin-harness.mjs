@@ -33,7 +33,7 @@ const registrationInfo = JSON.stringify({
   ],
   plugin: {
     uuid: "com.statuscheck.codex-usage",
-    version: "0.1.10.0",
+    version: "0.1.15.0",
   },
 });
 
@@ -43,6 +43,18 @@ const scenarios = [
     env: { CODEX_USAGE_MOCK_PAYLOAD: path.join(root, "test-fixtures", "green-usage.json") },
     settings: { displayMode: "dual-bars" },
     expect: "data:image/svg+xml",
+  },
+  {
+    name: "new codex usage api shape",
+    env: { CODEX_USAGE_MOCK_PAYLOAD: path.join(root, "test-fixtures", "codex-usage-new-shape.json") },
+    settings: { displayMode: "dual-bars" },
+    expectDecodedAll: ["76%", "5H", "91%", "WK"],
+  },
+  {
+    name: "free plan can omit secondary window",
+    env: { CODEX_USAGE_MOCK_PAYLOAD: path.join(root, "test-fixtures", "free-primary-only-usage.json") },
+    settings: { displayMode: "dual-bars" },
+    expectDecodedAll: ["93%", "5H", "93%", "WK"],
   },
   {
     name: "mixed dual bars split colors",

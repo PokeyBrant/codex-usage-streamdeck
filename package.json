@@ -1,6 +1,6 @@
 {
   "name": "codex-usage-streamdeck",
-  "version": "0.1.10",
+  "version": "0.1.15",
   "private": true,
   "description": "Unofficial local Codex usage monitor for Elgato Stream Deck.",
   "homepage": "https://github.com/statuscheckgg/codex-usage-streamdeck",

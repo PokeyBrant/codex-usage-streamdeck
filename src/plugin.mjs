@@ -4,12 +4,16 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { spawn } from "node:child_process";
 import streamDeck, { SingletonAction } from "@elgato/streamdeck";
 
 const PLUGIN_UUID = "com.statuscheck.codex-usage";
 const ACTION_UUID = "com.statuscheck.codex-usage.usage";
-const USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
-const PLUGIN_VERSION = "0.1.10.0";
+const USAGE_URL = "https://chatgpt.com/backend-api/codex/usage";
+const REFRESH_URL = "https://auth.openai.com/oauth/token";
+const REFRESH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
+const PLUGIN_VERSION = "0.1.15.0";
+const LOG_PATH = path.join(process.cwd(), "logs", "codex-usage.log");
 
 const actions = new Map();
 
@@ -80,9 +84,11 @@ main();
 
 async function main() {
   try {
+    logInfo("plugin_start", { version: PLUGIN_VERSION, cwd: process.cwd() });
     await streamDeck.connect();
   } catch (error) {
     clearInterval(runtimeKeepAlive);
+    logError("connect_failed", error);
     streamDeck.logger.error("Failed to connect Codex Usage Monitor.", error);
     process.exit(1);
   }
@@ -174,6 +180,7 @@ async function refreshAction(context, options = {}) {
       await action.sdkAction.showOk();
     }
   } catch (error) {
+    logError("refresh_failed", error);
     action.lastError = error;
     action.lastUsage = null;
     stopFlicker(action);
@@ -272,6 +279,7 @@ function clampNumber(value, fallback, min, max) {
 }
 
 async function fetchCodexUsage(settings) {
+  logInfo("fetch_start", { version: PLUGIN_VERSION, mock: Boolean(process.env.CODEX_USAGE_MOCK_PAYLOAD || process.env.CODEX_USAGE_MOCK_ERROR) });
   if (process.env.CODEX_USAGE_MOCK_ERROR) {
     const err = new Error(`Mock ${process.env.CODEX_USAGE_MOCK_ERROR}`);
     err.code = process.env.CODEX_USAGE_MOCK_ERROR;
@@ -280,45 +288,50 @@ async function fetchCodexUsage(settings) {
 
   if (process.env.CODEX_USAGE_MOCK_PAYLOAD) {
     const payload = JSON.parse(fs.readFileSync(process.env.CODEX_USAGE_MOCK_PAYLOAD, "utf8"));
-    if (!payload?.rate_limit?.primary_window || !payload?.rate_limit?.secondary_window) {
+    if (!normalizeUsagePayload(payload)) {
       const err = new Error("Mock Codex usage response changed shape.");
       err.code = "ENDPOINT";
       throw err;
     }
-    return payload;
+    return normalizeUsagePayload(payload);
   }
 
-  const auth = readCodexAuth(settings.authPath);
-  const tokens = auth.tokens || {};
-  const accessToken = tokens.access_token;
-  const accountId = tokens.account_id;
+  const authPath = resolveAuthPath(settings.authPath);
+  let auth = readCodexAuth(authPath);
+  let tokens = getAuthTokens(auth);
+  logInfo("auth_loaded", {
+    authPath: redactHome(authPath),
+    hasAccessToken: Boolean(tokens.accessToken),
+    hasRefreshToken: Boolean(tokens.refreshToken),
+    hasAccountId: Boolean(tokens.accountId),
+    idTokenExp: getIdTokenExp(auth),
+  });
 
-  if (!accessToken || !accountId) {
+  if (!tokens.accessToken || !tokens.accountId) {
     const err = new Error("Codex is not logged in.");
     err.code = "LOGIN";
     throw err;
   }
 
-  let response;
-  try {
-    response = await fetch(USAGE_URL, {
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        "ChatGPT-Account-Id": accountId,
-        "User-Agent": "codex-cli",
-        Accept: "application/json",
-      },
-    });
-  } catch {
-    const err = new Error("Network error while checking Codex usage.");
-    err.code = "NETWORK";
-    throw err;
-  }
+  let response = await requestUsage(tokens);
+  logInfo("usage_response", { status: response.status });
 
   if (response.status === 401 || response.status === 403) {
-    const err = new Error("Codex login needs refresh.");
-    err.code = "AUTH";
-    throw err;
+    logInfo("usage_auth_rejected", { status: response.status });
+    auth = await refreshCodexAuth(authPath, auth);
+    tokens = getAuthTokens(auth);
+    if (!tokens.accessToken || !tokens.accountId) {
+      const err = new Error("Codex login needs refresh.");
+      err.code = "AUTH";
+      throw err;
+    }
+    response = await requestUsage(tokens);
+    logInfo("usage_response_after_refresh", { status: response.status });
+    if (response.status === 401 || response.status === 403) {
+      const err = new Error("Codex login needs refresh.");
+      err.code = "AUTH";
+      throw err;
+    }
   }
 
   if (!response.ok) {
@@ -329,16 +342,112 @@ async function fetchCodexUsage(settings) {
   }
 
   const payload = await response.json();
-  if (!payload?.rate_limit?.primary_window || !payload?.rate_limit?.secondary_window) {
+  const normalizedPayload = normalizeUsagePayload(payload);
+  if (!normalizedPayload) {
+    logInfo("payload_unrecognized", summarizePayload(payload));
     const err = new Error("Codex usage response changed shape.");
     err.code = "ENDPOINT";
     throw err;
   }
-  return payload;
+  logInfo("payload_ok", summarizePayload(payload));
+  return normalizedPayload;
 }
 
-function readCodexAuth(authPathOverride) {
-  const authPath = authPathOverride || path.join(os.homedir(), ".codex", "auth.json");
+function resolveAuthPath(authPathOverride) {
+  return authPathOverride || path.join(os.homedir(), ".codex", "auth.json");
+}
+
+async function requestUsage(tokens) {
+  if (process.platform === "win32") {
+    return requestUsageWithPowerShell(tokens);
+  }
+
+  try {
+    return await fetch(USAGE_URL, {
+      headers: {
+        Authorization: `Bearer ${tokens.accessToken}`,
+        "ChatGPT-Account-Id": tokens.accountId,
+        "User-Agent": "codex-cli",
+        Accept: "application/json",
+      },
+    });
+  } catch {
+    const err = new Error("Network error while checking Codex usage.");
+    err.code = "NETWORK";
+    throw err;
+  }
+}
+
+function requestUsageWithPowerShell(tokens) {
+  return new Promise((resolve, reject) => {
+    const script = `
+$ErrorActionPreference = 'Stop'
+$inputJson = [Console]::In.ReadToEnd()
+$data = $inputJson | ConvertFrom-Json
+$headers = @{
+  Authorization = 'Bearer ' + $data.accessToken
+  'ChatGPT-Account-Id' = $data.accountId
+  'User-Agent' = 'codex-cli'
+  Accept = 'application/json'
+}
+try {
+  $r = Invoke-WebRequest -Uri '${USAGE_URL}' -Headers $headers -Method GET -UseBasicParsing
+  [Console]::Out.Write((@{ status = [int]$r.StatusCode; body = $r.Content } | ConvertTo-Json -Compress))
+} catch {
+  $resp = $_.Exception.Response
+  if ($resp) {
+    $reader = New-Object System.IO.StreamReader($resp.GetResponseStream())
+    [Console]::Out.Write((@{ status = [int]$resp.StatusCode; body = $reader.ReadToEnd() } | ConvertTo-Json -Compress))
+  } else {
+    throw
+  }
+}
+`;
+    const child = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
+      windowsHide: true,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+    child.on("error", () => {
+      const err = new Error("Network error while checking Codex usage.");
+      err.code = "NETWORK";
+      reject(err);
+    });
+    child.on("close", (code) => {
+      if (code !== 0) {
+        const err = new Error(stderr.trim() || "Network error while checking Codex usage.");
+        err.code = "NETWORK";
+        reject(err);
+        return;
+      }
+      try {
+        const result = JSON.parse(stdout);
+        resolve({
+          status: Number(result.status || 0),
+          ok: Number(result.status || 0) >= 200 && Number(result.status || 0) < 300,
+          json: async () => JSON.parse(result.body),
+        });
+      } catch {
+        const err = new Error("Usage response could not be read.");
+        err.code = "HTTP";
+        reject(err);
+      }
+    });
+    child.stdin.end(JSON.stringify({
+      accessToken: tokens.accessToken,
+      accountId: tokens.accountId,
+    }));
+  });
+}
+
+function readCodexAuth(authPath) {
   if (!fs.existsSync(authPath)) {
     const err = new Error("Codex auth file not found.");
     err.code = "LOGIN";
@@ -351,6 +460,85 @@ function readCodexAuth(authPathOverride) {
     const err = new Error("Codex auth file could not be read.");
     err.code = "AUTH";
     throw err;
+  }
+}
+
+function getAuthTokens(auth) {
+  const tokens = auth.tokens || {};
+  return {
+    accessToken: tokens.access_token,
+    refreshToken: tokens.refresh_token,
+    accountId: tokens.account_id || tokens.id_token?.chatgpt_account_id,
+  };
+}
+
+async function refreshCodexAuth(authPath, auth) {
+  const tokens = getAuthTokens(auth);
+  if (!tokens.refreshToken) {
+    const err = new Error("Codex refresh token is not available.");
+    err.code = "AUTH";
+    throw err;
+  }
+
+  let response;
+  try {
+    logInfo("token_refresh_start", { url: REFRESH_URL });
+    response = await fetch(REFRESH_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "User-Agent": "codex-cli",
+        Accept: "application/json",
+      },
+      body: JSON.stringify({
+        client_id: REFRESH_CLIENT_ID,
+        grant_type: "refresh_token",
+        refresh_token: tokens.refreshToken,
+      }),
+    });
+  } catch {
+    const err = new Error("Network error while refreshing Codex login.");
+    err.code = "NETWORK";
+    throw err;
+  }
+
+  logInfo("token_refresh_response", { status: response.status });
+  if (!response.ok) {
+    const err = new Error("Codex login needs refresh.");
+    err.code = "AUTH";
+    throw err;
+  }
+
+  const refreshed = await response.json();
+  const nextAuth = {
+    ...auth,
+    tokens: {
+      ...(auth.tokens || {}),
+      access_token: refreshed.access_token || auth.tokens?.access_token,
+      refresh_token: refreshed.refresh_token || auth.tokens?.refresh_token,
+    },
+    last_refresh: new Date().toISOString(),
+  };
+
+  if (refreshed.id_token) {
+    nextAuth.tokens.id_token = parseJwtPayload(refreshed.id_token) || auth.tokens?.id_token;
+  }
+
+  fs.writeFileSync(authPath, `${JSON.stringify(nextAuth, null, 2)}\n`, "utf8");
+  logInfo("token_refresh_saved", { authPath: redactHome(authPath), hasNewAccessToken: Boolean(refreshed.access_token) });
+  return nextAuth;
+}
+
+function parseJwtPayload(token) {
+  const payload = String(token || "").split(".")[1];
+  if (!payload) {
+    return null;
+  }
+  try {
+    const padded = payload.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(payload.length / 4) * 4, "=");
+    return JSON.parse(Buffer.from(padded, "base64").toString("utf8"));
+  } catch {
+    return null;
   }
 }
 
@@ -392,6 +580,86 @@ function makeSnapshot(payload, settings) {
   };
 }
 
+function normalizeUsagePayload(payload) {
+  if (payload?.rate_limit?.primary_window) {
+    return {
+      ...payload,
+      rate_limit: {
+        ...payload.rate_limit,
+        secondary_window: payload.rate_limit.secondary_window || payload.rate_limit.primary_window,
+      },
+      additional_rate_limits: payload.additional_rate_limits || [],
+    };
+  }
+
+  const primary = payload?.primary || payload?.primaryWindow || payload?.rateLimit?.primary;
+  const secondary = payload?.secondary || payload?.secondaryWindow || payload?.rateLimit?.secondary || primary;
+  if (!primary) {
+    return null;
+  }
+
+  const additionalRateLimits = payload.additional_rate_limits || payload.additionalRateLimits || [];
+  return {
+    plan_type: payload.plan_type || payload.planType || "codex",
+    rate_limit: {
+      allowed: payload.allowed !== false && payload.rateLimit?.allowed !== false,
+      limit_reached: payload.limit_reached === true || payload.limitReached === true || payload.rateLimit?.limitReached === true,
+      primary_window: normalizeWindow(primary),
+      secondary_window: normalizeWindow(secondary),
+    },
+    code_review_rate_limit: payload.code_review_rate_limit || payload.codeReviewRateLimit || null,
+    additional_rate_limits: additionalRateLimits
+      .map(normalizeAdditionalLimit)
+      .filter(Boolean),
+    credits: payload.credits || null,
+  };
+}
+
+function normalizeAdditionalLimit(limit) {
+  const primary = limit?.rate_limit?.primary_window || limit?.primary || limit?.primaryWindow || limit?.rateLimit?.primary;
+  const secondary = limit?.rate_limit?.secondary_window || limit?.secondary || limit?.secondaryWindow || limit?.rateLimit?.secondary;
+  if (!primary && !secondary) {
+    return null;
+  }
+
+  return {
+    limit_name: limit.limit_name || limit.limitName || limit.metered_feature || limit.meteredFeature || "Extra",
+    metered_feature: limit.metered_feature || limit.meteredFeature || null,
+    rate_limit: {
+      allowed: limit.allowed !== false && limit.rateLimit?.allowed !== false,
+      limit_reached: limit.limit_reached === true || limit.limitReached === true || limit.rateLimit?.limitReached === true,
+      primary_window: normalizeWindow(primary || secondary),
+      secondary_window: normalizeWindow(secondary || primary),
+    },
+  };
+}
+
+function normalizeWindow(window) {
+  const usedPercent = window?.used_percent ?? window?.usedPercent ?? window?.usagePercent ?? window?.used;
+  const resetAt = window?.reset_at ?? window?.resetsAt ?? window?.resetAt;
+  const resetAfterSeconds = window?.reset_after_seconds ?? window?.resetAfterSeconds ?? secondsUntil(resetAt);
+  const limitWindowSeconds = window?.limit_window_seconds ?? window?.limitWindowSeconds ?? minutesToSeconds(window?.windowDurationMins);
+  return {
+    used_percent: usedPercent,
+    limit_window_seconds: limitWindowSeconds,
+    reset_after_seconds: resetAfterSeconds,
+    reset_at: resetAt,
+  };
+}
+
+function secondsUntil(epochSeconds) {
+  const value = Number(epochSeconds || 0);
+  if (!Number.isFinite(value) || value <= 0) {
+    return 0;
+  }
+  return Math.max(0, Math.ceil(value - Date.now() / 1000));
+}
+
+function minutesToSeconds(minutes) {
+  const value = Number(minutes || 0);
+  return Number.isFinite(value) && value > 0 ? value * 60 : 0;
+}
+
 function makeWindow(label, raw, root = {}) {
   const usedPercent = clampNumber(raw?.used_percent, 0, 0, 100);
   const remainingPercent = 100 - usedPercent;
@@ -406,6 +674,58 @@ function makeWindow(label, raw, root = {}) {
     resetText: formatReset(raw?.reset_after_seconds),
     allowed: root.allowed !== false,
     limitReached: root.limit_reached === true,
+  };
+}
+
+function logInfo(event, details = {}) {
+  writeLog("info", event, details);
+}
+
+function logError(event, error) {
+  writeLog("error", event, {
+    name: error?.name,
+    message: error?.message,
+    code: error?.code,
+    status: error?.status,
+    stack: error?.stack ? String(error.stack).split("\n").slice(0, 4).join(" | ") : undefined,
+  });
+}
+
+function writeLog(level, event, details = {}) {
+  try {
+    fs.mkdirSync(path.dirname(LOG_PATH), { recursive: true });
+    const line = JSON.stringify({
+      time: new Date().toISOString(),
+      level,
+      event,
+      ...details,
+    });
+    fs.appendFileSync(LOG_PATH, `${line}\n`, "utf8");
+  } catch {
+    // Logging must never break the Stream Deck action.
+  }
+}
+
+function redactHome(value) {
+  const home = os.homedir();
+  return String(value || "").replace(home, "~");
+}
+
+function getIdTokenExp(auth) {
+  const exp = auth?.tokens?.id_token?.exp;
+  return Number.isFinite(Number(exp)) ? Number(exp) : null;
+}
+
+function summarizePayload(payload) {
+  const rateLimit = payload?.rate_limit || payload?.rateLimit || {};
+  return {
+    topLevelKeys: Object.keys(payload || {}).slice(0, 20),
+    planType: payload?.plan_type || payload?.planType || null,
+    hasRateLimit: Boolean(payload?.rate_limit || payload?.rateLimit),
+    hasPrimaryWindow: Boolean(rateLimit.primary_window || rateLimit.primaryWindow || payload?.primary || payload?.primaryWindow),
+    hasSecondaryWindow: Boolean(rateLimit.secondary_window || rateLimit.secondaryWindow || payload?.secondary || payload?.secondaryWindow),
+    secondaryWindowIsNull: rateLimit.secondary_window === null || rateLimit.secondaryWindow === null,
+    additionalRateLimitsType: Array.isArray(payload?.additional_rate_limits || payload?.additionalRateLimits) ? "array" : typeof (payload?.additional_rate_limits || payload?.additionalRateLimits),
   };
 }
 

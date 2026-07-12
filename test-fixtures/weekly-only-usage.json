@@ -1,0 +1,40 @@
+{
+  "plan_type": "prolite",
+  "rate_limit": {
+    "allowed": true,
+    "limit_reached": false,
+    "primary_window": {
+      "used_percent": 19,
+      "limit_window_seconds": 604800,
+      "reset_after_seconds": 416000,
+      "reset_at": 1784500000
+    },
+    "secondary_window": null
+  },
+  "additional_rate_limits": [
+    {
+      "limit_name": "GPT-5.3-Codex-Spark",
+      "metered_feature": "codex_bengalfox",
+      "rate_limit": {
+        "allowed": true,
+        "limit_reached": false,
+        "primary_window": {
+          "used_percent": 37,
+          "limit_window_seconds": 604800,
+          "reset_after_seconds": 500000,
+          "reset_at": 1784584000
+        },
+        "secondary_window": null
+      }
+    }
+  ],
+  "credits": {
+    "has_credits": false,
+    "unlimited": false,
+    "overage_limit_reached": false,
+    "balance": "0"
+  },
+  "rate_limit_reset_credits": {
+    "available_count": 1
+  }
+}

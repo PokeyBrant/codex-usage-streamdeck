@@ -1,5 +1,13 @@
 # Release Notes
 
+## 0.1.11.0
+
+- Supports temporary removal of the five-hour Codex limit without showing an API changed warning.
+- Identifies five-hour and weekly quotas by window duration instead of response field position.
+- Shows unavailable quota windows as a green `OPEN` state while preserving available usage, reset, threshold, and flicker behavior.
+- Handles weekly-only Spark limits and safely ignores banked-reset metadata until it is exposed as a user-facing feature.
+- Preserves the improved spacing between three-digit percentages and quota labels.
+
 ## 0.1.7.0
 
 - Makes the single-icon display selector explicit: auto lowest remaining, 5-hour, or weekly.

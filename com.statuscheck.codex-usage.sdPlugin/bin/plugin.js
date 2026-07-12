@@ -17195,7 +17195,9 @@ var plugin_default = streamDeck;
 // src/plugin.mjs
 var ACTION_UUID = "com.statuscheck.codex-usage.usage";
 var USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
-var PLUGIN_VERSION = "0.1.10.0";
+var PLUGIN_VERSION = "0.1.11.0";
+var FIVE_HOUR_MAX_SECONDS = 24 * 60 * 60;
+var WEEKLY_MIN_SECONDS = 3 * 24 * 60 * 60;
 var actions = /* @__PURE__ */ new Map();
 var CodexUsageAction = class extends SingletonAction {
   constructor() {
@@ -17439,7 +17441,7 @@ async function fetchCodexUsage(settings2) {
   }
   if (process.env.CODEX_USAGE_MOCK_PAYLOAD) {
     const payload2 = JSON.parse(import_node_fs4.default.readFileSync(process.env.CODEX_USAGE_MOCK_PAYLOAD, "utf8"));
-    if (!payload2?.rate_limit?.primary_window || !payload2?.rate_limit?.secondary_window) {
+    if (!hasRecognizedWindows(payload2?.rate_limit)) {
       const err = new Error("Mock Codex usage response changed shape.");
       err.code = "ENDPOINT";
       throw err;
@@ -17482,7 +17484,7 @@ async function fetchCodexUsage(settings2) {
     throw err;
   }
   const payload = await response.json();
-  if (!payload?.rate_limit?.primary_window || !payload?.rate_limit?.secondary_window) {
+  if (!hasRecognizedWindows(payload?.rate_limit)) {
     const err = new Error("Codex usage response changed shape.");
     err.code = "ENDPOINT";
     throw err;
@@ -17516,15 +17518,19 @@ async function renderError(action2, error40) {
   await action2.sdkAction.setTitle("");
 }
 function makeSnapshot(payload, settings2) {
-  const primary = makeWindow("5H", payload.rate_limit?.primary_window, payload.rate_limit);
-  const weekly = makeWindow("WK", payload.rate_limit?.secondary_window, payload.rate_limit);
-  const lowest = primary.remainingPercent <= weekly.remainingPercent ? primary : weekly;
+  const windows = classifyRateLimitWindows(payload.rate_limit);
+  const primary = windows.fiveHour || makeOpenWindow("5H");
+  const weekly = windows.weekly || makeOpenWindow("WK");
+  const lowest = lowestAvailableWindow([primary, weekly]);
   const level = getLevel(lowest.remainingPercent, settings2);
   const rawSpark = (payload.additional_rate_limits || []).find((limit) => limit.limit_name || limit.metered_feature);
-  const spark = rawSpark ? {
+  const sparkWindows = rawSpark ? classifyRateLimitWindows(rawSpark.rate_limit, "SP") : null;
+  const sparkAvailable = sparkWindows ? [sparkWindows.fiveHour, sparkWindows.weekly].filter(Boolean) : [];
+  const spark = rawSpark && sparkAvailable.length > 0 ? {
     name: rawSpark.limit_name || rawSpark.metered_feature || "Extra",
-    primary: makeWindow("SP", rawSpark.rate_limit?.primary_window, rawSpark.rate_limit),
-    weekly: makeWindow("SP", rawSpark.rate_limit?.secondary_window, rawSpark.rate_limit)
+    fiveHour: sparkWindows.fiveHour,
+    weekly: sparkWindows.weekly,
+    lowest: lowestAvailableWindow(sparkAvailable)
   } : null;
   return {
     planType: payload.plan_type || "codex",
@@ -17538,12 +17544,32 @@ function makeSnapshot(payload, settings2) {
     limitReached: payload.rate_limit?.limit_reached === true
   };
 }
+function hasRecognizedWindows(rateLimit) {
+  const windows = classifyRateLimitWindows(rateLimit);
+  return Boolean(windows.fiveHour || windows.weekly);
+}
+function classifyRateLimitWindows(rateLimit, label = null) {
+  const result = { fiveHour: null, weekly: null };
+  for (const raw of [rateLimit?.primary_window, rateLimit?.secondary_window]) {
+    const seconds = Number(raw?.limit_window_seconds || 0);
+    if (seconds > 0 && seconds <= FIVE_HOUR_MAX_SECONDS && !result.fiveHour) {
+      result.fiveHour = makeWindow(label || "5H", raw, rateLimit);
+    } else if (seconds >= WEEKLY_MIN_SECONDS && !result.weekly) {
+      result.weekly = makeWindow(label || "WK", raw, rateLimit);
+    }
+  }
+  return result;
+}
+function lowestAvailableWindow(windows) {
+  return windows.filter((window) => window?.available).reduce((lowest, window) => !lowest || window.remainingPercent < lowest.remainingPercent ? window : lowest, null);
+}
 function makeWindow(label, raw, root = {}) {
   const usedPercent = clampNumber(raw?.used_percent, 0, 0, 100);
   const remainingPercent = 100 - usedPercent;
   const resetAt = Number(raw?.reset_at || 0);
   return {
     label,
+    available: true,
     usedPercent,
     remainingPercent,
     windowSeconds: Number(raw?.limit_window_seconds || 0),
@@ -17552,6 +17578,20 @@ function makeWindow(label, raw, root = {}) {
     resetText: formatReset(raw?.reset_after_seconds),
     allowed: root.allowed !== false,
     limitReached: root.limit_reached === true
+  };
+}
+function makeOpenWindow(label) {
+  return {
+    label,
+    available: false,
+    usedPercent: null,
+    remainingPercent: null,
+    windowSeconds: 0,
+    resetAfterSeconds: 0,
+    resetAt: 0,
+    resetText: "",
+    allowed: true,
+    limitReached: false
   };
 }
 function getLevel(remaining, settings2) {
@@ -17640,69 +17680,70 @@ function end() {
 }
 function renderDualBars(snapshot, settings2, state = {}) {
   const p = palette(snapshot.level);
-  const primaryPalette = palette(getLevel(snapshot.primary.remainingPercent, settings2));
-  const weeklyPalette = palette(getLevel(snapshot.weekly.remainingPercent, settings2));
-  const primary = valueFor(snapshot.primary, settings2);
-  const weekly = valueFor(snapshot.weekly, settings2);
-  const primaryWidth = Math.max(4, primary * 0.83);
-  const weeklyWidth = Math.max(4, weekly * 0.83);
+  const primaryPalette = palette(levelForWindow(snapshot.primary, settings2));
+  const weeklyPalette = palette(levelForWindow(snapshot.weekly, settings2));
+  const primary = displayValue(snapshot.primary, settings2);
+  const weekly = displayValue(snapshot.weekly, settings2);
+  const primaryWidth = Math.max(4, barValue(snapshot.primary, settings2) * 0.83);
+  const weeklyWidth = Math.max(4, barValue(snapshot.weekly, settings2) * 0.83);
+  const percentFont = [primary, weekly].some((value) => value === "OPEN" || Number(value) >= 100) ? 23 : 26;
   return `${base(p, state)}
-  <text x="23" y="45" fill="${p.text}" font-size="26" font-family="Arial, sans-serif" font-weight="800">${primary}%</text>
-  <text x="110" y="33" fill="${primaryPalette.accent}" font-size="17" font-family="Arial, sans-serif" font-weight="900" text-anchor="middle">5H</text>
-  <text x="110" y="53" fill="${p.text}" font-size="15" font-family="Arial, sans-serif" font-weight="800" text-anchor="middle">${settings2.showReset ? esc2(snapshot.primary.resetText) : " "}</text>
+  <text x="20" y="45" fill="${p.text}" font-size="${percentFont}" font-family="Arial, sans-serif" font-weight="800">${primary}${snapshot.primary.available ? "%" : ""}</text>
+  <text x="116" y="33" fill="${primaryPalette.accent}" font-size="16" font-family="Arial, sans-serif" font-weight="900" text-anchor="middle">5H</text>
+  <text x="116" y="53" fill="${p.text}" font-size="14" font-family="Arial, sans-serif" font-weight="800" text-anchor="middle">${settings2.showReset ? esc2(snapshot.primary.resetText) : " "}</text>
   <line x1="24" y1="65" x2="107" y2="65" stroke="${p.track}" stroke-width="6" stroke-linecap="round"/>
   <line x1="24" y1="65" x2="${24 + primaryWidth}" y2="65" stroke="${primaryPalette.accent}" stroke-width="6" stroke-linecap="round"/>
-  <text x="23" y="103" fill="${p.text}" font-size="26" font-family="Arial, sans-serif" font-weight="800">${weekly}%</text>
-  <text x="110" y="91" fill="${weeklyPalette.accent}" font-size="17" font-family="Arial, sans-serif" font-weight="900" text-anchor="middle">WK</text>
-  <text x="110" y="111" fill="${p.text}" font-size="15" font-family="Arial, sans-serif" font-weight="800" text-anchor="middle">${settings2.showReset ? esc2(snapshot.weekly.resetText) : " "}</text>
+  <text x="20" y="103" fill="${p.text}" font-size="${percentFont}" font-family="Arial, sans-serif" font-weight="800">${weekly}${snapshot.weekly.available ? "%" : ""}</text>
+  <text x="116" y="91" fill="${weeklyPalette.accent}" font-size="16" font-family="Arial, sans-serif" font-weight="900" text-anchor="middle">WK</text>
+  <text x="116" y="111" fill="${p.text}" font-size="14" font-family="Arial, sans-serif" font-weight="800" text-anchor="middle">${settings2.showReset ? esc2(snapshot.weekly.resetText) : " "}</text>
   <line x1="24" y1="123" x2="107" y2="123" stroke="${p.track}" stroke-width="6" stroke-linecap="round"/>
   <line x1="24" y1="123" x2="${24 + weeklyWidth}" y2="123" stroke="${weeklyPalette.accent}" stroke-width="6" stroke-linecap="round"/>
 ${end()}`;
 }
 function renderRing(snapshot, settings2, state = {}) {
   const active = selectSingleWindow(snapshot, settings2, "lowest");
-  const level = getLevel(active.remainingPercent, settings2);
+  const level = levelForWindow(active, settings2);
   const p = palette(level);
-  const value = valueFor(active, settings2);
-  const arc = ringArc(72, 68, 43, Math.max(0.01, value / 100));
+  const value = displayValue(active, settings2);
+  const arc = ringArc(72, 68, 43, Math.max(0.01, barValue(active, settings2) / 100));
   return `${base(p, state)}
   <circle cx="72" cy="68" r="43" fill="none" stroke="${p.track}" stroke-width="10" stroke-linecap="round"/>
   <path d="${arc}" fill="none" stroke="${p.accent}" stroke-width="10" stroke-linecap="round"/>
-  <text x="72" y="67" fill="${p.text}" font-size="28" font-family="Arial, sans-serif" font-weight="800" text-anchor="middle">${value}%</text>
+  <text x="72" y="67" fill="${p.text}" font-size="${active.available ? 28 : 24}" font-family="Arial, sans-serif" font-weight="800" text-anchor="middle">${value}${active.available ? "%" : ""}</text>
   <text x="72" y="85" fill="${p.text}" font-size="14" font-family="Arial, sans-serif" font-weight="900" text-anchor="middle">${active.label}</text>
   <text x="72" y="113" fill="${p.text}" font-size="15" font-family="Arial, sans-serif" font-weight="800" text-anchor="middle">${settings2.showReset ? esc2(active.resetText) : ""}</text>
 ${end()}`;
 }
 function renderWarningTile(snapshot, settings2, state = {}) {
   const active = selectSingleWindow(snapshot, settings2, "lowest");
-  const level = getLevel(active.remainingPercent, settings2);
+  const level = levelForWindow(active, settings2);
   const p = palette(level);
-  const value = valueFor(active, settings2);
+  const value = displayValue(active, settings2);
   const label = active.label;
   return `${base(p, state)}
   <text x="72" y="40" fill="${p.accent}" font-size="18" font-family="Arial, sans-serif" font-weight="900" text-anchor="middle">${esc2(label)}</text>
-  <text x="72" y="87" fill="${p.text}" font-size="47" font-family="Arial, sans-serif" font-weight="900" text-anchor="middle">${value}%</text>
+  <text x="72" y="87" fill="${p.text}" font-size="${active.available ? 47 : 36}" font-family="Arial, sans-serif" font-weight="900" text-anchor="middle">${value}${active.available ? "%" : ""}</text>
   <line x1="38" y1="104" x2="106" y2="104" stroke="${p.track}" stroke-width="9" stroke-linecap="round"/>
-  <line x1="38" y1="104" x2="${38 + Math.max(5, value * 0.68)}" y2="104" stroke="${p.accent}" stroke-width="9" stroke-linecap="round"/>
+  <line x1="38" y1="104" x2="${38 + Math.max(5, barValue(active, settings2) * 0.68)}" y2="104" stroke="${p.accent}" stroke-width="9" stroke-linecap="round"/>
   <text x="72" y="127" fill="${p.text}" font-size="16" font-family="Arial, sans-serif" font-weight="900" text-anchor="middle">${settings2.showReset ? esc2(active.resetText) : active.label}</text>
 ${end()}`;
 }
 function renderSplit(snapshot, settings2, state = {}) {
   const p = palette(snapshot.level);
-  const primaryPalette = palette(getLevel(snapshot.primary.remainingPercent, settings2));
-  const weeklyPalette = palette(getLevel(snapshot.weekly.remainingPercent, settings2));
-  const p1 = valueFor(snapshot.primary, settings2);
-  const w1 = valueFor(snapshot.weekly, settings2);
+  const primaryPalette = palette(levelForWindow(snapshot.primary, settings2));
+  const weeklyPalette = palette(levelForWindow(snapshot.weekly, settings2));
+  const p1 = displayValue(snapshot.primary, settings2);
+  const w1 = displayValue(snapshot.weekly, settings2);
   const panelFill = state.flickerOn ? p.flash : p.panel;
   return `<svg xmlns="http://www.w3.org/2000/svg" width="144" height="144" viewBox="0 0 144 144">
   <rect width="144" height="144" rx="28" fill="${p.bg}"/>
   <rect x="10" y="10" width="124" height="59" rx="21" fill="${panelFill}"/>
   <rect x="10" y="75" width="124" height="59" rx="21" fill="${panelFill}"/>
   <text x="24" y="35" fill="${primaryPalette.accent}" font-size="16" font-family="Arial, sans-serif" font-weight="900">5H</text>
-  <text x="24" y="59" fill="${p.text}" font-size="28" font-family="Arial, sans-serif" font-weight="900">${p1}%</text>
+  <text x="24" y="59" fill="${p.text}" font-size="${snapshot.primary.available ? 28 : 22}" font-family="Arial, sans-serif" font-weight="900">${p1}${snapshot.primary.available ? "%" : ""}</text>
   <text x="122" y="56" fill="#ffffff" font-size="18" font-family="Arial, sans-serif" font-weight="900" text-anchor="end">${settings2.showReset ? esc2(snapshot.primary.resetText) : ""}</text>
   <text x="24" y="100" fill="${weeklyPalette.accent}" font-size="16" font-family="Arial, sans-serif" font-weight="900">WK</text>
-  <text x="24" y="124" fill="${p.text}" font-size="28" font-family="Arial, sans-serif" font-weight="900">${w1}%</text>
+  <text x="24" y="124" fill="${p.text}" font-size="${snapshot.weekly.available ? 28 : 22}" font-family="Arial, sans-serif" font-weight="900">${w1}${snapshot.weekly.available ? "%" : ""}</text>
   <text x="122" y="121" fill="#ffffff" font-size="18" font-family="Arial, sans-serif" font-weight="900" text-anchor="end">${settings2.showReset ? esc2(snapshot.weekly.resetText) : ""}</text>
 ${end()}`;
 }
@@ -17780,14 +17821,14 @@ function selectSingleWindow(snapshot, settings2, fallback) {
   if (settings2.singleWindow === "weekly") {
     return snapshot.weekly;
   }
-  if (settings2.singleWindow === "spark" && snapshot.spark?.primary) {
-    return snapshot.spark.primary;
+  if (settings2.singleWindow === "spark" && snapshot.spark?.lowest) {
+    return snapshot.spark.lowest;
   }
   return fallback === "weekly" ? snapshot.weekly : snapshot.lowest;
 }
 function activeDisplayLevel(snapshot, settings2) {
   if (settings2.displayMode === "ring" || settings2.displayMode === "warning-tile") {
-    return getLevel(selectSingleWindow(snapshot, settings2, "lowest").remainingPercent, settings2);
+    return levelForWindow(selectSingleWindow(snapshot, settings2, "lowest"), settings2);
   }
   return snapshot.level;
 }
@@ -17800,6 +17841,15 @@ function flickerConfig(settings2, level) {
 }
 function valueFor(window, settings2) {
   return settings2.basis === "used" ? window.usedPercent : window.remainingPercent;
+}
+function displayValue(window, settings2) {
+  return window.available ? valueFor(window, settings2) : "OPEN";
+}
+function barValue(window, settings2) {
+  return window.available ? valueFor(window, settings2) : 100;
+}
+function levelForWindow(window, settings2) {
+  return window.available ? getLevel(window.remainingPercent, settings2) : "green";
 }
 function formatReset(seconds) {
   const value = Number(seconds || 0);

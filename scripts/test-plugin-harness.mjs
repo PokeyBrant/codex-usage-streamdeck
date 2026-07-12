@@ -33,7 +33,7 @@ const registrationInfo = JSON.stringify({
   ],
   plugin: {
     uuid: "com.statuscheck.codex-usage",
-    version: "0.1.10.0",
+    version: "0.1.11.0",
   },
 });
 
@@ -50,6 +50,45 @@ const scenarios = [
     settings: { displayMode: "dual-bars", yellowThreshold: 50, redThreshold: 20, criticalThreshold: 10 },
     expectDecoded: "stroke=\"#34e977\"",
     expectDecodedAll: ["fill=\"#f6d84d\"", "fill=\"#34e977\""],
+  },
+  {
+    name: "weekly-only dual bars shows five-hour open",
+    env: { CODEX_USAGE_MOCK_PAYLOAD: path.join(root, "test-fixtures", "weekly-only-usage.json") },
+    settings: { displayMode: "dual-bars" },
+    expectDecodedAll: ["OPEN", "81%", "5H", "WK", "x=\"116\" y=\"33\""],
+    rejectDecodedAll: ["CHANGED"],
+  },
+  {
+    name: "weekly-only split shows five-hour open",
+    env: { CODEX_USAGE_MOCK_PAYLOAD: path.join(root, "test-fixtures", "weekly-only-usage.json") },
+    settings: { displayMode: "split" },
+    expectDecodedAll: ["OPEN", "81%", "5H", "WK"],
+  },
+  {
+    name: "weekly-only auto ring selects weekly",
+    env: { CODEX_USAGE_MOCK_PAYLOAD: path.join(root, "test-fixtures", "weekly-only-usage.json") },
+    settings: { displayMode: "ring", singleWindow: "auto" },
+    expectDecodedAll: ["81%", "WK"],
+    rejectDecodedAll: ["OPEN"],
+  },
+  {
+    name: "weekly-only explicit five-hour warning shows open",
+    env: { CODEX_USAGE_MOCK_PAYLOAD: path.join(root, "test-fixtures", "weekly-only-usage.json") },
+    settings: { displayMode: "warning-tile", singleWindow: "primary" },
+    expectDecodedAll: ["OPEN", "5H"],
+    rejectDecodedAll: ["81%"],
+  },
+  {
+    name: "weekly-only spark selection uses available window",
+    env: { CODEX_USAGE_MOCK_PAYLOAD: path.join(root, "test-fixtures", "weekly-only-usage.json") },
+    settings: { displayMode: "ring", singleWindow: "spark" },
+    expectDecodedAll: ["63%", "SP"],
+  },
+  {
+    name: "five-hour-only dual bars shows weekly open",
+    env: { CODEX_USAGE_MOCK_PAYLOAD: path.join(root, "test-fixtures", "five-hour-only-usage.json") },
+    settings: { displayMode: "dual-bars" },
+    expectDecodedAll: ["54%", "OPEN", "5H", "WK"],
   },
   {
     name: "critical warning tile",
@@ -132,6 +171,12 @@ const scenarios = [
   {
     name: "endpoint changed",
     env: { CODEX_USAGE_MOCK_ERROR: "ENDPOINT" },
+    settings: {},
+    expectDecoded: "CHANGED",
+  },
+  {
+    name: "unrecognized successful payload shows endpoint changed",
+    env: { CODEX_USAGE_MOCK_PAYLOAD: path.join(root, "test-fixtures", "unrecognized-usage.json") },
     settings: {},
     expectDecoded: "CHANGED",
   },

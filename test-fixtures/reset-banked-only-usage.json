@@ -1,0 +1,24 @@
+{
+  "plan_type": "prolite",
+  "rate_limit": {
+    "allowed": true,
+    "limit_reached": false,
+    "primary_window": {
+      "used_percent": 54,
+      "limit_window_seconds": 18000,
+      "reset_after_seconds": 1800,
+      "reset_at": 1778150000
+    },
+    "secondary_window": {
+      "used_percent": 17,
+      "limit_window_seconds": 604800,
+      "reset_after_seconds": 410000,
+      "reset_at": 1778551284
+    }
+  },
+  "additional_rate_limits": [],
+  "rate_limit_reset_credits": {
+    "available_count": 2,
+    "applicable_available_count": 0
+  }
+}

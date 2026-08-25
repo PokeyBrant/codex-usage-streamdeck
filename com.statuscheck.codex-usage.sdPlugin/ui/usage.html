@@ -17,9 +17,9 @@
       font-size: 12px;
     }
     h2 {
-      margin: 16px 0 8px;
+      margin: 18px 0 8px;
       font-size: 12px;
-      color: #9ca8b8;
+      color: #a9c7ed;
       letter-spacing: .06em;
       text-transform: uppercase;
     }
@@ -46,14 +46,81 @@
       width: 18px;
       height: 18px;
     }
+    select option:disabled {
+      color: #727b88;
+    }
     .hint {
-      line-height: 1.35;
+      line-height: 1.4;
       color: #a7b0bd;
       background: #12161d;
       border: 1px solid #2b3340;
       border-radius: 8px;
       padding: 10px;
       margin: 8px 0 12px;
+    }
+    .subhint {
+      margin: 5px 0 9px;
+      color: #909aa8;
+      line-height: 1.35;
+    }
+    .status-card {
+      border: 1px solid #2d3947;
+      border-radius: 9px;
+      background: #111820;
+      padding: 10px;
+      margin-bottom: 12px;
+    }
+    .status-head {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      font-weight: 800;
+      margin-bottom: 9px;
+    }
+    .status-dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      background: #60a5fa;
+      box-shadow: 0 0 0 3px rgb(96 165 250 / 14%);
+    }
+    .status-card[data-state="ok"] .status-dot {
+      background: #34e977;
+      box-shadow: 0 0 0 3px rgb(52 233 119 / 14%);
+    }
+    .status-card[data-state="error"] .status-dot {
+      background: #ffb020;
+      box-shadow: 0 0 0 3px rgb(255 176 32 / 14%);
+    }
+    .status-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+    .status-metric {
+      border: 1px solid #26313d;
+      border-radius: 7px;
+      background: #0d131a;
+      padding: 8px;
+    }
+    .status-metric span {
+      display: block;
+      color: #8f9baa;
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: .04em;
+    }
+    .status-metric strong {
+      display: block;
+      margin-top: 3px;
+      color: #f2f7fb;
+      font-size: 14px;
+      overflow-wrap: anywhere;
+    }
+    .status-time {
+      margin-top: 8px;
+      color: #8f9baa;
+      font-size: 11px;
     }
     .row {
       display: grid;
@@ -66,22 +133,31 @@
     }
     .flicker-grid {
       display: grid;
-      grid-template-columns: 1fr;
       gap: 6px;
       margin-top: 8px;
     }
     .flicker-row {
       display: grid;
-      grid-template-columns: 80px 56px 1fr;
+      grid-template-columns: 72px 32px 1fr;
       gap: 8px;
       align-items: center;
       min-height: 30px;
     }
-    .flicker-row span {
+    .flicker-row > span:first-child {
       font-weight: 700;
     }
-    .flicker-row input[type="number"] {
+    .interval {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 6px;
+      align-items: center;
+    }
+    .interval input {
       width: 100%;
+      box-sizing: border-box;
+    }
+    .interval span {
+      color: #99a4b2;
     }
     button {
       width: 100%;
@@ -90,9 +166,25 @@
       background: #2ddc74;
       color: #07120d;
       padding: 8px 10px;
-      margin-top: 10px;
+      margin-top: 8px;
       font: inherit;
       font-weight: 800;
+    }
+    button:disabled {
+      background: #42644e;
+      color: #bdd2c3;
+    }
+    details {
+      margin-top: 18px;
+      border-top: 1px solid #2b3340;
+      padding-top: 10px;
+    }
+    summary {
+      color: #a9c7ed;
+      cursor: pointer;
+      font-weight: 800;
+      letter-spacing: .06em;
+      text-transform: uppercase;
     }
     .footer {
       margin-top: 14px;
@@ -106,11 +198,25 @@
       color: #c6d0dd;
       font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
     }
+    [hidden] {
+      display: none !important;
+    }
   </style>
 </head>
 <body>
   <div class="hint">
-    This unofficial monitor reads your local Codex auth file and requests usage from ChatGPT. Nothing is logged by the plugin. Usage checks do not consume Codex usage tokens.
+    This unofficial monitor reads your local Codex auth file and requests usage plus reset details from ChatGPT. Nothing is logged by the plugin. These read-only checks do not consume Codex usage tokens or apply a reset.
+  </div>
+
+  <div class="status-card" id="usageStatus" data-state="refreshing">
+    <div class="status-head"><span class="status-dot"></span><span id="statusText">Waiting for usage data</span></div>
+    <div class="status-grid">
+      <div class="status-metric"><span>Banked resets</span><strong id="bankedResets">Not reported</strong></div>
+      <div class="status-metric"><span>Current usage</span><strong id="resetApplicability">Not reported</strong></div>
+      <div class="status-metric"><span>Reset</span><strong id="resetTitle">Not reported</strong></div>
+      <div class="status-metric"><span>Expires</span><strong id="resetExpires">Not reported</strong></div>
+    </div>
+    <div class="status-time" id="lastUpdated">No successful update yet</div>
   </div>
 
   <h2>Display</h2>
@@ -121,34 +227,43 @@
       <option value="ring">Ring gauge</option>
       <option value="warning-tile">Warning tile</option>
       <option value="split">Split key</option>
+      <option value="reset-details">Reset details</option>
     </select>
   </label>
-  <label>
+  <div class="subhint" id="resetDetailsHint" hidden>Display-only. Pressing the key refreshes these details; it never spends a reset.</div>
+  <label id="basisRow">
     Percent
     <select id="basis">
       <option value="remaining">Remaining</option>
       <option value="used">Used</option>
     </select>
   </label>
-  <label>
+  <label id="singleWindowRow">
     Single icon shows
     <select id="singleWindow">
       <option value="auto">Auto - lowest remaining</option>
       <option value="primary">5-hour</option>
       <option value="weekly">Weekly</option>
-      <option value="spark">Spark limit</option>
+      <option value="spark" id="sparkOption">Spark limit</option>
     </select>
   </label>
-  <label>
-    Refresh seconds
-    <input id="refreshSeconds" type="number" min="15" max="3600" step="15">
-  </label>
-  <label>
+  <div class="subhint" id="sparkHint" hidden>Spark is not reported right now. The saved selection is preserved and the key falls back to Auto.</div>
+  <label id="showResetRow">
     Show reset time
     <input id="showReset" type="checkbox">
   </label>
-  <h2>Thresholds</h2>
-  <div class="row">
+  <label id="showManualResetsRow">
+    Show banked resets
+    <input id="showManualResets" type="checkbox">
+  </label>
+  <label>
+    Use 24-hour time
+    <input id="use24HourTime" type="checkbox">
+  </label>
+
+  <h2 id="thresholdsHeading">Remaining thresholds</h2>
+  <div class="subhint" id="thresholdsHint">Threshold colors always use remaining capacity, even when the key displays percent used.</div>
+  <div class="row" id="thresholdsRow">
     <label>
       Yellow at
       <input id="yellowThreshold" type="number" min="1" max="99">
@@ -162,33 +277,44 @@
       <input id="criticalThreshold" type="number" min="1" max="99">
     </label>
   </div>
-  <h2>Visual Flicker</h2>
-  <div class="flicker-grid">
+
+  <h2 id="flickerHeading">Visual flicker</h2>
+  <div class="flicker-grid" id="flickerGrid">
     <div class="flicker-row">
       <span>Yellow</span>
       <input id="yellowFlicker" type="checkbox" title="Enable yellow flicker">
-      <input id="yellowFlickerSeconds" type="number" min="1" max="30" step="1" title="Yellow flicker seconds">
+      <div class="interval"><input id="yellowFlickerSeconds" type="number" min="1" max="30" step="1" title="Yellow flicker interval"><span>sec</span></div>
     </div>
     <div class="flicker-row">
       <span>Red</span>
       <input id="redFlicker" type="checkbox" title="Enable red flicker">
-      <input id="redFlickerSeconds" type="number" min="1" max="30" step="1" title="Red flicker seconds">
+      <div class="interval"><input id="redFlickerSeconds" type="number" min="1" max="30" step="1" title="Red flicker interval"><span>sec</span></div>
     </div>
     <div class="flicker-row">
       <span>Critical</span>
       <input id="criticalFlicker" type="checkbox" title="Enable critical flicker">
-      <input id="criticalFlickerSeconds" type="number" min="1" max="30" step="1" title="Critical flicker seconds">
+      <div class="interval"><input id="criticalFlickerSeconds" type="number" min="1" max="30" step="1" title="Critical flicker interval"><span>sec</span></div>
     </div>
   </div>
 
-  <h2>Advanced</h2>
+  <h2>Updates</h2>
   <label>
-    Auth path
-    <input id="authPath" type="text" placeholder="Blank uses ~/.codex/auth.json">
+    Refresh seconds
+    <input id="refreshSeconds" type="number" min="15" max="3600" step="15">
   </label>
   <button id="refreshNow" type="button">Refresh Now</button>
+  <div class="subhint" id="refreshFeedback">The key also refreshes when pressed.</div>
+
+  <details>
+    <summary>Advanced</summary>
+    <label>
+      Auth path
+      <input id="authPath" type="text" placeholder="Blank uses ~/.codex/auth.json">
+    </label>
+  </details>
+
   <div class="footer">
-    Codex Usage Monitor <code>v0.1.11.0</code><br>
+    Codex Usage Monitor <code>v0.1.12.0</code><br>
     Support info: action <code>com.statuscheck.codex-usage.usage</code>
   </div>
 
@@ -196,6 +322,8 @@
     let websocket = null;
     let uuid = null;
     let actionInfo = null;
+    let saveTimer = null;
+    let latestStatus = null;
 
     const defaults = {
       displayMode: "dual-bars",
@@ -212,6 +340,8 @@
       criticalFlicker: false,
       criticalFlickerSeconds: 1,
       showReset: true,
+      showManualResets: true,
+      use24HourTime: false,
       authPath: ""
     };
 
@@ -224,11 +354,14 @@
       websocket.onopen = function () {
         websocket.send(JSON.stringify({ event: inRegisterEvent, uuid }));
         websocket.send(JSON.stringify({ event: "getSettings", context: uuid }));
+        sendToPlugin({ type: "request-status" });
       };
       websocket.onmessage = function (event) {
         const message = JSON.parse(event.data);
         if (message.event === "didReceiveSettings") {
           applySettings({ ...defaults, ...(message.payload.settings || {}) });
+        } else if (message.event === "sendToPropertyInspector" && message.payload?.type === "usage-status") {
+          applyUsageStatus(message.payload);
         }
       };
     }
@@ -243,6 +376,7 @@
           element.value = settings[id];
         }
       }
+      updateConditionalControls();
     }
 
     function readSettings() {
@@ -272,15 +406,18 @@
       }));
     }
 
-    for (const id of ids) {
-      const element = document.getElementById(id);
-      if (element) {
-        element.addEventListener("input", saveSettings);
-        element.addEventListener("change", saveSettings);
-      }
+    function scheduleSave() {
+      clearTimeout(saveTimer);
+      saveTimer = setTimeout(saveSettings, 300);
     }
 
-    document.getElementById("refreshNow").addEventListener("click", function () {
+    function saveImmediately() {
+      clearTimeout(saveTimer);
+      updateConditionalControls();
+      saveSettings();
+    }
+
+    function sendToPlugin(payload) {
       if (!websocket || websocket.readyState !== WebSocket.OPEN || !actionInfo) {
         return;
       }
@@ -288,8 +425,110 @@
         event: "sendToPlugin",
         context: uuid,
         action: actionInfo.action,
-        payload: { type: "refresh" }
+        payload
       }));
+    }
+
+    function updateConditionalControls() {
+      const mode = document.getElementById("displayMode").value;
+      const singleMode = mode === "ring" || mode === "warning-tile";
+      const resetDetailsMode = mode === "reset-details";
+      document.getElementById("singleWindowRow").hidden = !singleMode;
+      document.getElementById("basisRow").hidden = resetDetailsMode;
+      document.getElementById("showResetRow").hidden = resetDetailsMode;
+      document.getElementById("showManualResetsRow").hidden = resetDetailsMode;
+      document.getElementById("resetDetailsHint").hidden = !resetDetailsMode;
+      document.getElementById("thresholdsHeading").hidden = resetDetailsMode;
+      document.getElementById("thresholdsHint").hidden = resetDetailsMode;
+      document.getElementById("thresholdsRow").hidden = resetDetailsMode;
+      document.getElementById("flickerHeading").hidden = resetDetailsMode;
+      document.getElementById("flickerGrid").hidden = resetDetailsMode;
+      const sparkKnownUnavailable = latestStatus && !latestStatus.capabilities?.sparkAvailable;
+      document.getElementById("sparkOption").disabled = Boolean(sparkKnownUnavailable);
+      document.getElementById("sparkHint").hidden = !singleMode || !sparkKnownUnavailable;
+    }
+
+    function applyUsageStatus(status) {
+      latestStatus = status;
+      const card = document.getElementById("usageStatus");
+      const button = document.getElementById("refreshNow");
+      card.dataset.state = status.state;
+      button.disabled = status.state === "refreshing";
+      button.textContent = status.state === "refreshing" ? "Refreshing…" : "Refresh Now";
+      document.getElementById("statusText").textContent = statusLabel(status);
+      document.getElementById("bankedResets").textContent = countLabel(status.resetCredits?.availableCount);
+      const use24HourTime = document.getElementById("use24HourTime").checked;
+      const timeOptions = use24HourTime
+        ? { hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" }
+        : { hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true };
+      document.getElementById("resetApplicability").textContent = applicabilityLabel(status.resetCredits);
+      document.getElementById("resetTitle").textContent = status.resetCredits?.title
+        || (status.resetCredits?.availableCount === 0 ? "No reset" : status.resetCredits?.detailsError ? "Details unavailable" : "Not reported");
+      document.getElementById("resetExpires").textContent = expirationLabel(status.resetCredits?.expiresAt, use24HourTime);
+      document.getElementById("lastUpdated").textContent = status.lastUpdatedAt
+        ? `Last updated ${new Date(status.lastUpdatedAt).toLocaleTimeString([], timeOptions)}`
+        : "No successful update yet";
+      document.getElementById("refreshFeedback").textContent = status.state === "error"
+        ? statusLabel(status)
+        : status.state === "refreshing" ? "Requesting current usage…" : "Usage is current. The key also refreshes when pressed.";
+      updateConditionalControls();
+    }
+
+    function countLabel(value) {
+      return Number.isInteger(value) && value >= 0 ? String(value) : "Not reported";
+    }
+
+    function applicabilityLabel(resetCredits) {
+      const banked = resetCredits?.availableCount;
+      if (banked === 0) return "No reset";
+      if (!resetCredits?.applicableReported) return "Not reported";
+      const applicable = resetCredits.applicableAvailableCount;
+      if (!Number.isInteger(applicable) || applicable < 0) return "Not reported";
+      return applicable > 0 ? `${applicable} applies now` : "No reset needed";
+    }
+
+    function expirationLabel(expiresAt, use24HourTime) {
+      if (!expiresAt) return "Not reported";
+      const date = new Date(expiresAt);
+      if (!Number.isFinite(date.getTime())) return "Not reported";
+      const dateText = date.toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" });
+      const timeText = date.toLocaleTimeString([], use24HourTime
+        ? { hour: "2-digit", minute: "2-digit", hourCycle: "h23", timeZoneName: "short" }
+        : { hour: "numeric", minute: "2-digit", hour12: true, timeZoneName: "short" });
+      return `${dateText}, ${timeText}`;
+    }
+
+    function statusLabel(status) {
+      if (status.state === "refreshing") return "Refreshing usage";
+      if (status.state === "ok") return "Usage data current";
+      return {
+        LOGIN: "Codex login required",
+        AUTH: "Codex login expired",
+        NETWORK: "Network request failed",
+        ENDPOINT: "Usage response changed",
+        HTTP: "Usage request failed"
+      }[status.errorCode] || "Usage unavailable";
+    }
+
+    for (const id of ids) {
+      const element = document.getElementById(id);
+      if (!element) continue;
+      if (element.type === "checkbox" || element.tagName === "SELECT") {
+        element.addEventListener("change", saveImmediately);
+      } else {
+        element.addEventListener("input", scheduleSave);
+        element.addEventListener("change", saveImmediately);
+      }
+    }
+
+    document.getElementById("refreshNow").addEventListener("click", function () {
+      applyUsageStatus({
+        ...(latestStatus || { resetCredits: {}, capabilities: {} }),
+        type: "usage-status",
+        state: "refreshing",
+        errorCode: null
+      });
+      sendToPlugin({ type: "refresh" });
     });
 
     applySettings(defaults);

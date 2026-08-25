@@ -9,7 +9,8 @@ import streamDeck, { SingletonAction } from "@elgato/streamdeck";
 const PLUGIN_UUID = "com.statuscheck.codex-usage";
 const ACTION_UUID = "com.statuscheck.codex-usage.usage";
 const USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
-const PLUGIN_VERSION = "0.1.11.0";
+const RESET_CREDITS_URL = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits";
+const PLUGIN_VERSION = "0.1.12.0";
 const FIVE_HOUR_MAX_SECONDS = 24 * 60 * 60;
 const WEEKLY_MIN_SECONDS = 3 * 24 * 60 * 60;
 
@@ -32,7 +33,10 @@ class CodexUsageAction extends SingletonAction {
       flickerTimer: null,
       flickerOn: false,
       lastUsage: null,
+      lastResetDetails: null,
+      resetDetailsError: null,
       lastError: null,
+      lastUpdatedAt: null,
     });
     scheduleRefresh(context);
     await refreshAction(context, { force: true });
@@ -51,25 +55,56 @@ class CodexUsageAction extends SingletonAction {
   async onDidReceiveSettings(ev) {
     const context = ev.action.id;
     const settings = normalizeSettings(ev.payload?.settings);
-    const action = actions.get(context) || {
+    const existing = actions.get(context);
+    const action = existing || {
       context,
       sdkAction: ev.action,
       refreshTimer: null,
       flickerTimer: null,
       flickerOn: false,
       lastUsage: null,
+      lastResetDetails: null,
+      resetDetailsError: null,
       lastError: null,
+      lastUpdatedAt: null,
     };
+    const authPathChanged = action.settings?.authPath !== settings.authPath;
+    const refreshChanged = action.settings?.refreshSeconds !== settings.refreshSeconds;
     action.sdkAction = ev.action;
     action.settings = settings;
     actions.set(context, action);
-    scheduleRefresh(context);
-    await refreshAction(context, { force: true });
+    if (!existing || refreshChanged) {
+      scheduleRefresh(context);
+    }
+    if (!existing || authPathChanged || (!action.lastUsage && !action.lastError)) {
+      await refreshAction(context, { force: true });
+      return;
+    }
+    if (action.lastUsage) {
+      action.flickerOn = false;
+      await renderAction(action, action.lastUsage);
+      scheduleFlicker(context);
+    } else if (action.lastError) {
+      await renderError(action, action.lastError);
+    }
+    await sendUsageStatus(action);
   }
 
   async onSendToPlugin(ev) {
     if (ev.payload?.type === "refresh") {
       await refreshAction(ev.action.id, { force: true, feedback: true });
+    } else if (ev.payload?.type === "request-status") {
+      const action = actions.get(ev.action.id);
+      if (action) {
+        await sendUsageStatus(action);
+      }
+    }
+  }
+
+  async onPropertyInspectorDidAppear(ev) {
+    const action = actions.get(ev.action.id);
+    if (action) {
+      await sendUsageStatus(action);
     }
   }
 }
@@ -140,7 +175,7 @@ function scheduleFlicker(context) {
   }
 
   stopFlicker(action);
-  const snapshot = makeSnapshot(action.lastUsage, action.settings);
+  const snapshot = makeSnapshot(action.lastUsage, action.settings, action.lastResetDetails);
   const level = activeDisplayLevel(snapshot, action.settings);
   const config = flickerConfig(action.settings, level);
   if (!config?.enabled) {
@@ -165,13 +200,25 @@ async function refreshAction(context, options = {}) {
     return;
   }
 
+  await sendUsageStatus(action, "refreshing");
   try {
-    const usage = await fetchCodexUsage(action.settings);
+    const [usageResult, resetDetailsResult] = await Promise.allSettled([
+      fetchCodexUsage(action.settings),
+      fetchResetDetails(action.settings),
+    ]);
+    if (usageResult.status === "rejected") {
+      throw usageResult.reason;
+    }
+    const usage = usageResult.value;
     action.lastUsage = usage;
+    action.lastResetDetails = resetDetailsResult.status === "fulfilled" ? resetDetailsResult.value : null;
+    action.resetDetailsError = resetDetailsResult.status === "rejected" ? resetDetailsResult.reason : null;
     action.lastError = null;
+    action.lastUpdatedAt = new Date().toISOString();
     action.flickerOn = false;
     await renderAction(action, usage);
     scheduleFlicker(context);
+    await sendUsageStatus(action, "ok");
     if (options.feedback) {
       await action.sdkAction.showOk();
     }
@@ -180,6 +227,7 @@ async function refreshAction(context, options = {}) {
     action.lastUsage = null;
     stopFlicker(action);
     await renderError(action, error);
+    await sendUsageStatus(action, "error", error);
     if (options.feedback) {
       await action.sdkAction.showAlert();
     }
@@ -200,6 +248,8 @@ function defaultSettings() {
     criticalFlicker: false,
     criticalFlickerSeconds: 1,
     showReset: true,
+    showManualResets: true,
+    use24HourTime: false,
     authPath: "",
     basis: "remaining",
     singleWindow: "auto",
@@ -222,6 +272,8 @@ function normalizeSettings(raw = {}) {
     criticalFlicker: toBool(raw.criticalFlicker, defaults.criticalFlicker),
     criticalFlickerSeconds: clampNumber(raw.criticalFlickerSeconds, defaults.criticalFlickerSeconds, 1, 30),
     showReset: toBool(raw.showReset, defaults.showReset),
+    showManualResets: toBool(raw.showManualResets, defaults.showManualResets),
+    use24HourTime: toBool(raw.use24HourTime, defaults.use24HourTime),
     authPath: typeof raw.authPath === "string" ? raw.authPath.trim() : defaults.authPath,
     basis: pick(raw.basis, defaults.basis),
     singleWindow: normalizeSingleWindow(raw.singleWindow, legacyDisplayMode, defaults.singleWindow, raw.showSpark),
@@ -233,7 +285,7 @@ function pick(value, fallback) {
 }
 
 function normalizeDisplayMode(value) {
-  if (value === "dual-bars" || value === "ring" || value === "warning-tile" || value === "split") {
+  if (value === "dual-bars" || value === "ring" || value === "warning-tile" || value === "split" || value === "reset-details") {
     return value;
   }
   if (value === "weekly-tile" || value === "lowest") {
@@ -339,6 +391,65 @@ async function fetchCodexUsage(settings) {
   return payload;
 }
 
+async function fetchResetDetails(settings) {
+  if (process.env.CODEX_RESET_CREDITS_MOCK_ERROR) {
+    const err = new Error(`Mock ${process.env.CODEX_RESET_CREDITS_MOCK_ERROR}`);
+    err.code = process.env.CODEX_RESET_CREDITS_MOCK_ERROR;
+    throw err;
+  }
+
+  if (process.env.CODEX_RESET_CREDITS_MOCK_PAYLOAD) {
+    return JSON.parse(fs.readFileSync(process.env.CODEX_RESET_CREDITS_MOCK_PAYLOAD, "utf8"));
+  }
+
+  // Usage fixtures should remain fully offline unless a reset-details fixture is supplied.
+  if (process.env.CODEX_USAGE_MOCK_PAYLOAD || process.env.CODEX_USAGE_MOCK_ERROR) {
+    return null;
+  }
+
+  const auth = readCodexAuth(settings.authPath);
+  const tokens = auth.tokens || {};
+  const accessToken = tokens.access_token;
+  const accountId = tokens.account_id;
+
+  if (!accessToken || !accountId) {
+    const err = new Error("Codex is not logged in.");
+    err.code = "LOGIN";
+    throw err;
+  }
+
+  let response;
+  try {
+    response = await fetch(RESET_CREDITS_URL, {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "ChatGPT-Account-Id": accountId,
+        "User-Agent": "codex-cli",
+        Accept: "application/json",
+      },
+    });
+  } catch {
+    const err = new Error("Network error while checking reset details.");
+    err.code = "NETWORK";
+    throw err;
+  }
+
+  if (response.status === 401 || response.status === 403) {
+    const err = new Error("Codex login needs refresh.");
+    err.code = "AUTH";
+    throw err;
+  }
+
+  if (!response.ok) {
+    const err = new Error(`Reset details request failed: ${response.status}`);
+    err.code = response.status === 404 ? "ENDPOINT" : "HTTP";
+    err.status = response.status;
+    throw err;
+  }
+
+  return response.json();
+}
+
 function readCodexAuth(authPathOverride) {
   const authPath = authPathOverride || path.join(os.homedir(), ".codex", "auth.json");
   if (!fs.existsSync(authPath)) {
@@ -357,7 +468,7 @@ function readCodexAuth(authPathOverride) {
 }
 
 async function renderAction(action, payload) {
-  const snapshot = makeSnapshot(payload, action.settings);
+  const snapshot = makeSnapshot(payload, action.settings, action.lastResetDetails);
   const svg = renderUsageSvg(snapshot, action.settings, { flickerOn: action.flickerOn });
   await action.sdkAction.setImage(`data:image/svg+xml,${encodeURIComponent(svg)}`, { target: 0 });
   await action.sdkAction.setTitle("");
@@ -369,7 +480,42 @@ async function renderError(action, error) {
   await action.sdkAction.setTitle("");
 }
 
-function makeSnapshot(payload, settings) {
+async function sendUsageStatus(action, state = null, error = null) {
+  if (!action) {
+    return;
+  }
+  const snapshot = action.lastUsage ? makeSnapshot(action.lastUsage, action.settings, action.lastResetDetails) : null;
+  const resolvedState = state || (action.lastError ? "error" : action.lastUsage ? "ok" : "refreshing");
+  const statusError = error || action.lastError;
+  const knownErrorCodes = new Set(["LOGIN", "AUTH", "NETWORK", "ENDPOINT", "HTTP"]);
+  const errorCode = resolvedState === "error" && knownErrorCodes.has(statusError?.code) ? statusError.code : null;
+  try {
+    await streamDeck.ui.sendToPropertyInspector({
+      type: "usage-status",
+      state: resolvedState,
+      lastUpdatedAt: action.lastUpdatedAt,
+      resetCredits: {
+        availableCount: snapshot?.resetCredits.availableCount ?? null,
+        applicableAvailableCount: snapshot?.resetCredits.applicableAvailableCount ?? null,
+        applicableReported: snapshot?.resetCredits.applicableReported ?? false,
+        detailsReported: snapshot?.resetCredits.details.detailsReported ?? false,
+        title: snapshot?.resetCredits.details.title ?? null,
+        resetType: snapshot?.resetCredits.details.resetType ?? null,
+        status: snapshot?.resetCredits.details.status ?? null,
+        expiresAt: snapshot?.resetCredits.details.expiresAt ?? null,
+        detailsError: action.resetDetailsError ? sanitizeErrorCode(action.resetDetailsError) : null,
+      },
+      capabilities: {
+        sparkAvailable: Boolean(snapshot?.spark),
+      },
+      errorCode,
+    });
+  } catch {
+    // The property inspector may not be visible; key rendering should continue normally.
+  }
+}
+
+function makeSnapshot(payload, settings, resetDetailsPayload = null) {
   const windows = classifyRateLimitWindows(payload.rate_limit);
   const primary = windows.fiveHour || makeOpenWindow("5H");
   const weekly = windows.weekly || makeOpenWindow("WK");
@@ -384,6 +530,15 @@ function makeSnapshot(payload, settings) {
     weekly: sparkWindows.weekly,
     lowest: lowestAvailableWindow(sparkAvailable),
   } : null;
+  const usageResetCredits = normalizeResetCredits(payload.rate_limit_reset_credits);
+  const resetDetails = normalizeResetDetails(resetDetailsPayload);
+  const bankedCount = resetDetails.availableCount ?? usageResetCredits.availableCount;
+  const resetCredits = {
+    ...usageResetCredits,
+    availableCount: bankedCount,
+    keyDisplayCount: bankedCount,
+    details: resetDetails,
+  };
 
   return {
     planType: payload.plan_type || "codex",
@@ -392,10 +547,97 @@ function makeSnapshot(payload, settings) {
     lowest,
     level,
     spark,
+    resetCredits,
     credits: payload.credits || null,
     allowed: payload.rate_limit?.allowed !== false,
     limitReached: payload.rate_limit?.limit_reached === true,
   };
+}
+
+function normalizeResetCredits(raw) {
+  if (!raw || typeof raw !== "object") {
+    return {
+      availableCount: null,
+      applicableAvailableCount: null,
+      applicableReported: false,
+      keyDisplayCount: null,
+    };
+  }
+  const applicableReported = Object.prototype.hasOwnProperty.call(raw, "applicable_available_count");
+  const availableCount = normalizeNonNegativeInteger(raw.available_count);
+  const applicableAvailableCount = applicableReported
+    ? normalizeNonNegativeInteger(raw.applicable_available_count)
+    : null;
+  return {
+    availableCount,
+    applicableAvailableCount,
+    applicableReported,
+    keyDisplayCount: availableCount,
+  };
+}
+
+function normalizeResetDetails(raw) {
+  const empty = {
+    detailsReported: false,
+    availableCount: null,
+    title: null,
+    resetType: null,
+    status: null,
+    expiresAt: null,
+  };
+  if (!raw || typeof raw !== "object") {
+    return empty;
+  }
+
+  const availableCount = normalizeNonNegativeInteger(raw.available_count);
+  const credits = Array.isArray(raw.credits) ? raw.credits : [];
+  const availableCredits = credits.filter((credit) => (
+    credit
+    && typeof credit === "object"
+    && credit.status === "available"
+    && credit.is_supported_by_plan !== false
+  ));
+  const selected = availableCredits
+    .map((credit) => ({ credit, expiresAt: normalizeIsoTimestamp(credit.expires_at) }))
+    .sort((left, right) => {
+      if (left.expiresAt == null) return 1;
+      if (right.expiresAt == null) return -1;
+      return Date.parse(left.expiresAt) - Date.parse(right.expiresAt);
+    })[0];
+
+  return {
+    detailsReported: true,
+    availableCount,
+    title: normalizeDisplayText(selected?.credit.title, 32),
+    resetType: normalizeDisplayText(selected?.credit.reset_type, 40),
+    status: normalizeDisplayText(selected?.credit.status, 24),
+    expiresAt: selected?.expiresAt ?? null,
+  };
+}
+
+function normalizeIsoTimestamp(value) {
+  if (typeof value !== "string" && typeof value !== "number") {
+    return null;
+  }
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null;
+}
+
+function normalizeDisplayText(value, maxLength) {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const normalized = value.trim().replace(/\s+/g, " ");
+  return normalized.length > 0 ? normalized.slice(0, maxLength) : null;
+}
+
+function sanitizeErrorCode(error) {
+  const knownErrorCodes = new Set(["LOGIN", "AUTH", "NETWORK", "ENDPOINT", "HTTP"]);
+  return knownErrorCodes.has(error?.code) ? error.code : "HTTP";
+}
+
+function normalizeNonNegativeInteger(value) {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : null;
 }
 
 function hasRecognizedWindows(rateLimit) {
@@ -467,6 +709,8 @@ function getLevel(remaining, settings) {
 
 function renderUsageSvg(snapshot, settings, state = {}) {
   switch (settings.displayMode) {
+    case "reset-details":
+      return renderResetDetails(snapshot, settings, state);
     case "ring":
       return renderRing(snapshot, settings, state);
     case "warning-tile":
@@ -553,15 +797,19 @@ function renderDualBars(snapshot, settings, state = {}) {
   const primaryWidth = Math.max(4, barValue(snapshot.primary, settings) * 0.83);
   const weeklyWidth = Math.max(4, barValue(snapshot.weekly, settings) * 0.83);
   const percentFont = [primary, weekly].some((value) => value === "OPEN" || Number(value) >= 100) ? 23 : 26;
+  const primarySecondary = keySecondaryText(snapshot.primary, snapshot, settings, snapshot.primary === snapshot.lowest);
+  const weeklySecondary = keySecondaryText(snapshot.weekly, snapshot, settings, snapshot.weekly === snapshot.lowest);
+  const primarySecondaryX = manualResetVisible(snapshot, settings, snapshot.primary === snapshot.lowest) ? 109 : 116;
+  const weeklySecondaryX = manualResetVisible(snapshot, settings, snapshot.weekly === snapshot.lowest) ? 109 : 116;
   return `${base(p, state)}
   <text x="20" y="45" fill="${p.text}" font-size="${percentFont}" font-family="Arial, sans-serif" font-weight="800">${primary}${snapshot.primary.available ? "%" : ""}</text>
   <text x="116" y="33" fill="${primaryPalette.accent}" font-size="16" font-family="Arial, sans-serif" font-weight="900" text-anchor="middle">5H</text>
-  <text x="116" y="53" fill="${p.text}" font-size="14" font-family="Arial, sans-serif" font-weight="800" text-anchor="middle">${settings.showReset ? esc(snapshot.primary.resetText) : " "}</text>
+  <text x="${primarySecondaryX}" y="53" fill="${p.text}" font-size="${secondaryFontSize(primarySecondary, 14)}" font-family="Arial, sans-serif" font-weight="800" text-anchor="middle">${esc(primarySecondary || " ")}</text>
   <line x1="24" y1="65" x2="107" y2="65" stroke="${p.track}" stroke-width="6" stroke-linecap="round"/>
   <line x1="24" y1="65" x2="${24 + primaryWidth}" y2="65" stroke="${primaryPalette.accent}" stroke-width="6" stroke-linecap="round"/>
   <text x="20" y="103" fill="${p.text}" font-size="${percentFont}" font-family="Arial, sans-serif" font-weight="800">${weekly}${snapshot.weekly.available ? "%" : ""}</text>
   <text x="116" y="91" fill="${weeklyPalette.accent}" font-size="16" font-family="Arial, sans-serif" font-weight="900" text-anchor="middle">WK</text>
-  <text x="116" y="111" fill="${p.text}" font-size="14" font-family="Arial, sans-serif" font-weight="800" text-anchor="middle">${settings.showReset ? esc(snapshot.weekly.resetText) : " "}</text>
+  <text x="${weeklySecondaryX}" y="111" fill="${p.text}" font-size="${secondaryFontSize(weeklySecondary, 14)}" font-family="Arial, sans-serif" font-weight="800" text-anchor="middle">${esc(weeklySecondary || " ")}</text>
   <line x1="24" y1="123" x2="107" y2="123" stroke="${p.track}" stroke-width="6" stroke-linecap="round"/>
   <line x1="24" y1="123" x2="${24 + weeklyWidth}" y2="123" stroke="${weeklyPalette.accent}" stroke-width="6" stroke-linecap="round"/>
 ${end()}`;
@@ -572,13 +820,17 @@ function renderRing(snapshot, settings, state = {}) {
   const level = levelForWindow(active, settings);
   const p = palette(level);
   const value = displayValue(active, settings);
-  const arc = ringArc(72, 68, 43, Math.max(0.01, barValue(active, settings) / 100));
+  const ringStart = -125;
+  const ringSweep = 250;
+  const arc = ringArc(72, 72, 46, Math.max(0.01, barValue(active, settings) / 100), ringStart, ringSweep);
+  const track = `<path d="${ringArc(72, 72, 46, 1, ringStart, ringSweep)}" fill="none" stroke="${p.track}" stroke-width="10" stroke-linecap="round"/>`;
+  const secondary = keySecondaryText(active, snapshot, settings, active.label !== "SP");
   return `${base(p, state)}
-  <circle cx="72" cy="68" r="43" fill="none" stroke="${p.track}" stroke-width="10" stroke-linecap="round"/>
+  ${track}
   <path d="${arc}" fill="none" stroke="${p.accent}" stroke-width="10" stroke-linecap="round"/>
-  <text x="72" y="67" fill="${p.text}" font-size="${active.available ? 28 : 24}" font-family="Arial, sans-serif" font-weight="800" text-anchor="middle">${value}${active.available ? "%" : ""}</text>
-  <text x="72" y="85" fill="${p.text}" font-size="14" font-family="Arial, sans-serif" font-weight="900" text-anchor="middle">${active.label}</text>
-  <text x="72" y="113" fill="${p.text}" font-size="15" font-family="Arial, sans-serif" font-weight="800" text-anchor="middle">${settings.showReset ? esc(active.resetText) : ""}</text>
+  <text x="72" y="71" fill="${p.text}" font-size="${active.available ? 27 : 24}" font-family="Arial, sans-serif" font-weight="800" text-anchor="middle">${value}${active.available ? "%" : ""}</text>
+  <text x="72" y="89" fill="${p.text}" font-size="16" font-family="Arial, sans-serif" font-weight="900" text-anchor="middle">${active.label}</text>
+  <text x="72" y="117" fill="${p.text}" font-size="${secondaryFontSize(secondary, 17)}" font-family="Arial, sans-serif" font-weight="800" text-anchor="middle">${esc(secondary)}</text>
 ${end()}`;
 }
 
@@ -587,13 +839,24 @@ function renderWarningTile(snapshot, settings, state = {}) {
   const level = levelForWindow(active, settings);
   const p = palette(level);
   const value = displayValue(active, settings);
-  const label = active.label;
+  const label = warningWindowLabel(active.label);
+  const resetDuration = settings.showReset && active.available
+    ? formatResetVerbose(active.resetAfterSeconds)
+    : "";
+  const resetIndicator = manualResetVisible(snapshot, settings, active.label !== "SP")
+    ? `R${snapshot.resetCredits.keyDisplayCount}`
+    : "";
+  const resetLine = [resetDuration, resetIndicator].filter(Boolean).join(" · ");
+  const resetClock = settings.showReset && active.available
+    ? formatResetClock(active.resetAt, settings.use24HourTime)
+    : "";
   return `${base(p, state)}
-  <text x="72" y="40" fill="${p.accent}" font-size="18" font-family="Arial, sans-serif" font-weight="900" text-anchor="middle">${esc(label)}</text>
-  <text x="72" y="87" fill="${p.text}" font-size="${active.available ? 47 : 36}" font-family="Arial, sans-serif" font-weight="900" text-anchor="middle">${value}${active.available ? "%" : ""}</text>
-  <line x1="38" y1="104" x2="106" y2="104" stroke="${p.track}" stroke-width="9" stroke-linecap="round"/>
-  <line x1="38" y1="104" x2="${38 + Math.max(5, barValue(active, settings) * 0.68)}" y2="104" stroke="${p.accent}" stroke-width="9" stroke-linecap="round"/>
-  <text x="72" y="127" fill="${p.text}" font-size="16" font-family="Arial, sans-serif" font-weight="900" text-anchor="middle">${settings.showReset ? esc(active.resetText) : active.label}</text>
+  <text x="72" y="32" fill="${p.accent}" font-size="20" font-family="Arial, sans-serif" font-weight="900" text-anchor="middle">${esc(label)}</text>
+  <text x="72" y="75" fill="${p.text}" font-size="${active.available ? 47 : 36}" font-family="Arial, sans-serif" font-weight="900" text-anchor="middle">${value}${active.available ? "%" : ""}</text>
+  <line x1="30" y1="91" x2="113" y2="91" stroke="${p.track}" stroke-width="9" stroke-linecap="round"/>
+  <line x1="30" y1="91" x2="${30 + Math.max(5, barValue(active, settings) * 0.83)}" y2="91" stroke="${p.accent}" stroke-width="9" stroke-linecap="round"/>
+  <text x="72" y="113" fill="${p.text}" font-size="${warningDetailFontSize(resetLine)}" font-family="Arial, sans-serif" font-weight="900" text-anchor="middle">${esc(resetLine)}</text>
+  <text x="72" y="130" fill="${p.text}" font-size="13" font-family="Arial, sans-serif" font-weight="800" text-anchor="middle">${esc(resetClock)}</text>
 ${end()}`;
 }
 
@@ -604,17 +867,90 @@ function renderSplit(snapshot, settings, state = {}) {
   const p1 = displayValue(snapshot.primary, settings);
   const w1 = displayValue(snapshot.weekly, settings);
   const panelFill = state.flickerOn ? p.flash : p.panel;
+  const primarySecondary = keySecondaryText(snapshot.primary, snapshot, settings, snapshot.primary === snapshot.lowest);
+  const weeklySecondary = keySecondaryText(snapshot.weekly, snapshot, settings, snapshot.weekly === snapshot.lowest);
   return `<svg xmlns="http://www.w3.org/2000/svg" width="144" height="144" viewBox="0 0 144 144">
   <rect width="144" height="144" rx="28" fill="${p.bg}"/>
   <rect x="10" y="10" width="124" height="59" rx="21" fill="${panelFill}"/>
   <rect x="10" y="75" width="124" height="59" rx="21" fill="${panelFill}"/>
   <text x="24" y="35" fill="${primaryPalette.accent}" font-size="16" font-family="Arial, sans-serif" font-weight="900">5H</text>
   <text x="24" y="59" fill="${p.text}" font-size="${snapshot.primary.available ? 28 : 22}" font-family="Arial, sans-serif" font-weight="900">${p1}${snapshot.primary.available ? "%" : ""}</text>
-  <text x="122" y="56" fill="#ffffff" font-size="18" font-family="Arial, sans-serif" font-weight="900" text-anchor="end">${settings.showReset ? esc(snapshot.primary.resetText) : ""}</text>
+  <text x="122" y="35" fill="#ffffff" font-size="${secondaryFontSize(primarySecondary, 18)}" font-family="Arial, sans-serif" font-weight="900" text-anchor="end">${esc(primarySecondary)}</text>
   <text x="24" y="100" fill="${weeklyPalette.accent}" font-size="16" font-family="Arial, sans-serif" font-weight="900">WK</text>
   <text x="24" y="124" fill="${p.text}" font-size="${snapshot.weekly.available ? 28 : 22}" font-family="Arial, sans-serif" font-weight="900">${w1}${snapshot.weekly.available ? "%" : ""}</text>
-  <text x="122" y="121" fill="#ffffff" font-size="18" font-family="Arial, sans-serif" font-weight="900" text-anchor="end">${settings.showReset ? esc(snapshot.weekly.resetText) : ""}</text>
+  <text x="122" y="100" fill="#ffffff" font-size="${secondaryFontSize(weeklySecondary, 18)}" font-family="Arial, sans-serif" font-weight="900" text-anchor="end">${esc(weeklySecondary)}</text>
 ${end()}`;
+}
+
+function renderResetDetails(snapshot, settings, state = {}) {
+  const count = snapshot.resetCredits.availableCount;
+  const hasReset = Number.isInteger(count) && count > 0;
+  const countLabel = hasReset ? `R${count}` : count === 0 ? "NONE" : "—";
+  const details = snapshot.resetCredits.details;
+  const expiresDate = formatExpirationDate(details.expiresAt);
+  const expirationLabel = hasReset
+    ? expiresDate ? expiresDate.toUpperCase() : details.detailsReported ? "EXPIRY NOT REPORTED" : "DETAILS UNAVAILABLE"
+    : count === 0 ? "NO RESET AVAILABLE" : "DETAILS UNAVAILABLE";
+  const p = hasReset ? palette("green") : {
+    ...palette("green"),
+    accent: "#8f9baa",
+    soft: "#c7d0db",
+  };
+  const expirationBlock = hasReset && expiresDate
+    ? `<text x="72" y="96" fill="${p.accent}" font-size="11" font-family="Arial, sans-serif" font-weight="900" text-anchor="middle">EXPIRES</text>
+  <text x="72" y="123" fill="${p.accent}" font-size="24" font-family="Arial, sans-serif" font-weight="900" text-anchor="middle">${esc(expirationLabel)}</text>`
+    : `<text x="72" y="117" fill="${p.soft}" font-size="${resetExpirationFontSize(expirationLabel)}" font-family="Arial, sans-serif" font-weight="900" text-anchor="middle">${esc(expirationLabel)}</text>`;
+  return `${base(p, state)}
+  <text x="72" y="75" fill="${p.text}" font-size="${hasReset ? 58 : 34}" font-family="Arial, sans-serif" font-weight="900" text-anchor="middle">${esc(countLabel)}</text>
+  ${expirationBlock}
+${end()}`;
+}
+
+function resetExpirationFontSize(label) {
+  return String(label || "").length > 16 ? 11 : 13;
+}
+
+function keySecondaryText(window, snapshot, settings, includeManualResets) {
+  const parts = [];
+  if (settings.showReset && window.available && window.resetText) {
+    parts.push(window.resetText);
+  }
+  if (manualResetVisible(snapshot, settings, includeManualResets)) {
+    parts.push(`R${snapshot.resetCredits.keyDisplayCount}`);
+  }
+  return parts.join(" · ");
+}
+
+function manualResetVisible(snapshot, settings, includeManualResets) {
+  const resetCount = snapshot.resetCredits.keyDisplayCount;
+  return Boolean(
+    includeManualResets
+    && settings.showManualResets
+    && Number.isInteger(resetCount)
+    && resetCount > 0
+  );
+}
+
+function secondaryFontSize(text, baseSize) {
+  return text.length > 5 ? Math.max(12, baseSize - 3) : baseSize;
+}
+
+function warningWindowLabel(label) {
+  return {
+    "5H": "5 Hours",
+    WK: "Week",
+    SP: "Spark",
+  }[label] || label;
+}
+
+function warningDetailFontSize(text) {
+  if (text.length > 12) {
+    return 14;
+  }
+  if (text.length > 8) {
+    return 15;
+  }
+  return 17;
 }
 
 function renderErrorSvg(error) {
@@ -700,6 +1036,9 @@ function selectSingleWindow(snapshot, settings, fallback) {
 }
 
 function activeDisplayLevel(snapshot, settings) {
+  if (settings.displayMode === "reset-details") {
+    return "green";
+  }
   if (settings.displayMode === "ring" || settings.displayMode === "warning-tile") {
     return levelForWindow(selectSingleWindow(snapshot, settings, "lowest"), settings);
   }
@@ -747,9 +1086,52 @@ function formatReset(seconds) {
   return `${days}d`;
 }
 
-function ringArc(cx, cy, r, fraction) {
-  const start = -140;
-  const end = start + 280 * fraction;
+function formatResetVerbose(seconds) {
+  const value = Number(seconds || 0);
+  if (value <= 0) {
+    return "now";
+  }
+  const minutes = Math.ceil(value / 60);
+  if (minutes < 60) {
+    return `${minutes} min`;
+  }
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) {
+    return `${hours} ${hours === 1 ? "hour" : "hours"}`;
+  }
+  const days = Math.floor(hours / 24);
+  return `${days} ${days === 1 ? "day" : "days"}`;
+}
+
+function formatResetClock(resetAt, use24HourTime = false) {
+  const timestamp = Number(resetAt);
+  if (!Number.isFinite(timestamp) || timestamp <= 0) {
+    return "";
+  }
+  const date = new Date(timestamp * 1000);
+  if (!Number.isFinite(date.getTime())) {
+    return "";
+  }
+  return new Intl.DateTimeFormat(undefined, {
+    hour: use24HourTime ? "2-digit" : "numeric",
+    minute: "2-digit",
+    ...(use24HourTime ? { hourCycle: "h23" } : { hour12: true }),
+  }).format(date);
+}
+
+function formatExpirationDate(expiresAt) {
+  const date = new Date(expiresAt || "");
+  if (!Number.isFinite(date.getTime())) {
+    return "";
+  }
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+  }).format(date);
+}
+
+function ringArc(cx, cy, r, fraction, start = -140, sweep = 280) {
+  const end = start + sweep * fraction;
   const s = polar(cx, cy, r, start);
   const e = polar(cx, cy, r, end);
   const large = end - start <= 180 ? 0 : 1;

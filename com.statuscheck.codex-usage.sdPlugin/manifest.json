@@ -23,7 +23,7 @@
   "Category": "Codex Usage Monitor",
   "CategoryIcon": "imgs/category-icon",
   "CodePath": "bin/plugin.js",
-  "Description": "Unofficial local Codex usage monitor for Stream Deck. Displays 5-hour, weekly, credit, and optional model-specific usage from the local Codex login.",
+  "Description": "Unofficial local Codex usage monitor for Stream Deck. Displays 5-hour, weekly, banked-reset expiration, and optional model-specific usage from the local Codex login.",
   "Icon": "imgs/plugin-icon",
   "Name": "Codex Usage Monitor",
   "Nodejs": {
@@ -46,5 +46,5 @@
   "SupportURL": "https://github.com/statuscheckgg/codex-usage-streamdeck/issues",
   "URL": "https://github.com/statuscheckgg/codex-usage-streamdeck",
   "UUID": "com.statuscheck.codex-usage",
-  "Version": "0.1.11.0"
+  "Version": "0.1.12.0"
 }

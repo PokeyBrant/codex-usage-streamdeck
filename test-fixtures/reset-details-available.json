@@ -1,0 +1,19 @@
+{
+  "credits": [
+    {
+      "id": "reset-fixture-1",
+      "reset_type": "codex_rate_limits",
+      "is_supported_by_plan": true,
+      "status": "available",
+      "granted_at": "2026-08-22T00:25:55Z",
+      "expires_at": "2026-09-21T00:25:55Z",
+      "redeem_started_at": null,
+      "redeemed_at": null,
+      "title": "Full reset",
+      "description": null
+    }
+  ],
+  "available_count": 1,
+  "total_earned_count": 1,
+  "immediate_reset_purchase_eligible": false
+}

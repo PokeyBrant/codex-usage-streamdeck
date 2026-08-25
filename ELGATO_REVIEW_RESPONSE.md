@@ -1,5 +1,7 @@
 # Elgato Review Response Materials
 
+> Historical response for the earlier submission review. Use `SUBMISSION.md` for the current v0.1.12 upload candidate.
+
 ## Summary
 
 Elgato requested three revisions for Codex Usage Monitor:

@@ -13,7 +13,8 @@ If the key shows `API CHANGED`, the internal Codex usage endpoint or response sh
 ## Plugin Behavior
 
 - The plugin reads `~/.codex/auth.json`.
-- It sends usage requests only to `https://chatgpt.com/backend-api/wham/usage`.
+- It sends read-only requests only to `https://chatgpt.com/backend-api/wham/usage` and `https://chatgpt.com/backend-api/wham/rate-limit-reset-credits`.
+- It cannot apply or spend a reset. Pressing the key only refreshes displayed data.
 - It does not display, log, store, or transmit tokens to the plugin author.
 - End users do not need npm, PowerShell, API Ninja, or a local server.
 
@@ -21,7 +22,7 @@ If the key shows `API CHANGED`, the internal Codex usage endpoint or response sh
 
 - Plugin UUID: `com.statuscheck.codex-usage`
 - Action UUID: `com.statuscheck.codex-usage.usage`
-- Current version: `0.1.7.0`
+- Current version: `0.1.12.0`
 - Local Stream Deck plugin folder on Windows: `%APPDATA%\Elgato\StreamDeck\Plugins\com.statuscheck.codex-usage.sdPlugin`
 
 ## Optional Support

@@ -1,5 +1,17 @@
 # Release Notes
 
+## 0.1.12.0
+
+- Reports banked Codex rate-limit resets and whether current usage can benefit from one.
+- Adds a fifth, display-only Reset Details layout reduced to a large banked `R#` count and readable local expiration date, sourced from a second read-only ChatGPT request.
+- Optionally appends a positive banked `R#` indicator once to the active or lowest-capacity main quota while keeping Spark separate.
+- Gives the Dual Bars indicator more horizontal breathing room and uses a larger, vertically centered open-bottom Ring gauge with clearer quota/reset text and a 27 px percentage that cleanly fits `100%`.
+- Rebalances the Warning Tile around a centered percentage and Dual Bars-width progress track, expands its quota labels to `5 Hours`, `Week`, and `Spark`, and splits reset details into a readable duration plus exact local reset time with optional 24-hour formatting.
+- Adds a live Property Inspector status card with refresh state, last successful update, reset counts, and Spark availability.
+- Shows single-window controls only for relevant modes, clarifies remaining-capacity thresholds, labels flicker intervals, and groups update and advanced settings.
+- Debounces text and number settings and rerenders cached usage for visual-only changes instead of refetching usage.
+- Never applies or spends a reset; key presses and Property Inspector refreshes only update displayed data.
+
 ## 0.1.11.0
 
 - Supports temporary removal of the five-hour Codex limit without showing an API changed warning.

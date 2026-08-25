@@ -1,0 +1,12 @@
+{
+  "credits": [
+    {
+      "id": "reset-fixture-malformed",
+      "reset_type": "codex_rate_limits",
+      "status": "available",
+      "expires_at": "not-a-date",
+      "title": "   "
+    }
+  ],
+  "available_count": "1"
+}

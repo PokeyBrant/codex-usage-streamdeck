@@ -7,6 +7,7 @@ The plugin displays Codex usage from the local Codex login:
 - 5-hour usage window
 - Weekly usage window
 - Reset countdowns
+- Banked reset count, current-usage applicability, and reset expiration details
 - Optional extra model-specific limits such as Spark
 - Configurable visual modes, thresholds, and reset labels
 
@@ -31,8 +32,11 @@ Download the latest `.streamDeckPlugin` file from the GitHub releases page, then
 - Ring gauge
 - Warning tile
 - Split key
+- Reset details
 
-The Property Inspector also includes refresh interval, single-icon target, threshold, reset-label, and Spark-limit controls.
+The Property Inspector reports banked resets, whether the current usage is eligible to benefit from one, the nearest reset expiration, refresh status, and the last successful update. It also includes refresh interval, conditional single-icon targeting, remaining-capacity thresholds, reset-label controls, optional 24-hour clock formatting, and Spark availability.
+
+When a reset is banked, the quota layouts can append `R#` to the active reset countdown. The **Show banked resets** setting hides that indicator independently of reset countdowns. The dedicated Reset Details mode is deliberately minimal and shows only the banked `R#` count and expiration date. Every layout is display-only: pressing the key refreshes the data and never applies or spends a reset.
 
 ## Security Model
 
@@ -41,11 +45,15 @@ This plugin reads the user's local Codex auth file:
 - Windows: `%USERPROFILE%\.codex\auth.json`
 - macOS: `~/.codex/auth.json`
 
-It uses the stored Codex ChatGPT access token and account id to request:
+It uses the stored Codex ChatGPT access token and account id to make two read-only requests:
 
 `https://chatgpt.com/backend-api/wham/usage`
 
+`https://chatgpt.com/backend-api/wham/rate-limit-reset-credits`
+
 Tokens are not displayed, logged, or sent anywhere except OpenAI/ChatGPT.
+
+The plugin does not call a reset-consumption endpoint and cannot apply a banked reset.
 
 The plugin does not use the refresh token. If the access token is stale, the key shows a login/auth state and the user should refresh their Codex login through Codex itself.
 
